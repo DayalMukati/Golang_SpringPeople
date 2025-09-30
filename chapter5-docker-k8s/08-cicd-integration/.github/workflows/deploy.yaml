@@ -1,0 +1,38 @@
+name: CI/CD for Payment Service
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v3
+      with:
+        go-version: 1.21
+
+    - name: Run tests
+      run: go test ./...
+
+    - name: Build Docker image
+      run: docker build -t finpay/payment:${{ github.sha }} .
+
+    - name: Push Docker image
+      run: |
+        echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u ${{ secrets.DOCKER_USERNAME }} --password-stdin
+        docker push finpay/payment:${{ github.sha }}
+
+    - name: Deploy to Kubernetes
+      uses: azure/k8s-deploy@v4
+      with:
+        manifests: |
+          k8s/payment-deployment.yaml
+        images: |
+          finpay/payment:${{ github.sha }}
+        namespace: default
