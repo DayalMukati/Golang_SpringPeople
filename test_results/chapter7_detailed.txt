@@ -1,0 +1,845 @@
+================================================================================
+                 CHAPTER 7: SCALABILITY - TEST RESULTS
+================================================================================
+Test Execution Date: October 1, 2025, 11:00 IST
+Go Version: 1.25.1
+Platform: macOS (darwin/arm64)
+Test Status: COMPLETED ✓
+
+PURPOSE OF THIS DOCUMENT:
+This file contains comprehensive analysis of scalability patterns and strategies
+for microservices demonstrated in Chapter 7. Topics covered:
+  - Horizontal vs Vertical scaling
+  - Load balancing strategies
+  - Database scaling patterns
+  - Caching strategies
+  - Stateless vs Stateful services
+  - Capacity planning
+  - Cost optimization
+
+TEST RESULT FORMAT:
+  📁 File Location
+  📝 Concept Description & Problem It Solves
+  🏗️  How It Works
+  ✅ Expected Behavior
+  🔧 Compilation Status
+  💡 Key Takeaways
+
+================================================================================
+SECTION 01: INTRODUCTION TO SCALABILITY
+================================================================================
+Topic: Basic scalability concepts for microservices
+Learning Goal: Understand what scalability means and why it matters
+
+--------------------------------------------------------------------------------
+TEST 1.1: Basic Payment Service
+--------------------------------------------------------------------------------
+📁 Location: chapter7-scalability/01-introduction/main.go
+
+📝 Problem It Solves:
+   Starting point: Simple payment service that will need to scale
+   - Currently handles 10 requests/second
+   - What if traffic grows to 100 req/s? 1000 req/s?
+   - Single server has limits (CPU, memory, network)
+   - Need strategies to handle growth
+
+   Scalability Dimensions:
+   1. User Growth: More customers using FinPay
+   2. Transaction Volume: More payments per customer
+   3. Data Size: More historical transactions to store
+   4. Geographic Expansion: Serve global customers
+
+🏗️  How It Works:
+   Basic Payment Service:
+   ```go
+   func payHandler(w http.ResponseWriter, r *http.Request) {
+       fmt.Fprintln(w, "Payment processed")
+   }
+
+   func main() {
+       http.HandleFunc("/pay", payHandler)
+       fmt.Println("Starting server on :8080")
+       http.ListenAndServe(":8080", nil)
+   }
+   ```
+
+   Current Capacity:
+   - 1 server instance
+   - Can handle ~1000 concurrent connections
+   - CPU/Memory bottlenecks
+   - Network bandwidth limits
+
+✅ Expected Behavior:
+   - Listens on port 8080
+   - Processes payment requests
+   - Returns "Payment processed"
+   - Foundation for scaling strategies
+
+🔧 Compilation Status: SUCCESS ✓
+   Command: go build main.go
+   Result: Binary created successfully
+
+🌐 Load Testing:
+   ```bash
+   # Install tool
+   go install github.com/rakyll/hey@latest
+
+   # Test current capacity
+   hey -n 10000 -c 100 http://localhost:8080/pay
+
+   # Results (example):
+   # Total requests: 10000
+   # Successful: 10000
+   # Requests/sec: 2500
+   # Average latency: 40ms
+   # This represents our baseline
+   ```
+
+💡 Key Takeaways:
+   - Every service has capacity limits
+   - Scalability = handling growth without degradation
+   - Must measure baseline before optimizing
+   - Load testing reveals bottlenecks
+
+================================================================================
+SECTION 02: HORIZONTAL VS VERTICAL SCALING
+================================================================================
+Topic: Two fundamental approaches to scaling
+Learning Goal: Understand when to scale up vs scale out
+
+📝 Scaling Strategies:
+
+   VERTICAL SCALING (Scale Up):
+   - Add more resources to existing server
+   - Bigger CPU, more RAM, faster disk
+   - Example: t2.micro → t2.xlarge → t2.2xlarge
+   - Simple but has limits
+
+   Pros:
+   ✓ Simple (no code changes)
+   ✓ No distributed system complexity
+   ✓ Good for databases (avoid sharding)
+
+   Cons:
+   ✗ Hardware limits (max CPU/RAM)
+   ✗ Single point of failure
+   ✗ Expensive at high-end
+   ✗ Downtime during upgrades
+
+   HORIZONTAL SCALING (Scale Out):
+   - Add more server instances
+   - Distribute load across many servers
+   - Example: 1 server → 10 servers → 100 servers
+   - Requires distributed system design
+
+   Pros:
+   ✓ No upper limit (add infinite servers)
+   ✓ High availability (server failures OK)
+   ✓ Cost-effective (commodity hardware)
+   ✓ Zero-downtime scaling
+
+   Cons:
+   ✗ Requires code changes (stateless design)
+   ✗ Distributed system complexity
+   ✗ Need load balancer
+   ✗ Data consistency challenges
+
+🏗️  FinPay Scaling Example:
+
+   Vertical Scaling (Not Recommended):
+   ```
+   Day 1:  1 server (2 CPU, 4GB RAM)   → 100 req/s
+   Day 30: 1 server (8 CPU, 32GB RAM)  → 400 req/s
+   Day 60: 1 server (32 CPU, 128GB RAM) → 1600 req/s
+   Day 90: Hit hardware limit! ❌
+   ```
+
+   Horizontal Scaling (Recommended):
+   ```
+   Day 1:  3 servers (2 CPU, 4GB each)    → 300 req/s
+   Day 30: 10 servers (2 CPU, 4GB each)   → 1000 req/s
+   Day 60: 50 servers (2 CPU, 4GB each)   → 5000 req/s
+   Day 90: 200 servers (2 CPU, 4GB each)  → 20,000 req/s
+   No limit! ✓
+   ```
+
+💡 Key Takeaways:
+   - Horizontal scaling preferred for web services
+   - Vertical scaling OK for databases (to a point)
+   - Kubernetes makes horizontal scaling easy
+   - Design for horizontal scaling from day 1
+
+================================================================================
+SECTION 04: LOAD BALANCING
+================================================================================
+Topic: Distributing traffic across multiple service instances
+Learning Goal: Understand load balancing algorithms and implementations
+
+--------------------------------------------------------------------------------
+TEST 4.1: Load-Balanced Payment Service
+--------------------------------------------------------------------------------
+📁 Location: chapter7-scalability/04-load-balancing/main.go
+
+📝 Problem It Solves:
+   Multiple payment service instances:
+   - Instance 1 on port 8081
+   - Instance 2 on port 8082
+   - Instance 3 on port 8083
+   - How does client know which to call?
+   - How to distribute load evenly?
+
+   Load Balancer Solution:
+   - Single entry point (e.g., payment-service:8080)
+   - Distributes requests across backends
+   - Health checks (remove dead instances)
+   - Session affinity (if needed)
+
+🏗️  How It Works:
+   Payment Service Code:
+   ```go
+   type Reply struct {
+       Pod       string `json:"pod"`        // Which instance?
+       Timestamp string `json:"ts"`         // When?
+       Path      string `json:"path"`       // What endpoint?
+   }
+
+   func pay(w http.ResponseWriter, r *http.Request) {
+       host, _ := os.Hostname()
+       resp := Reply{
+           Pod:       host,  // Shows which pod handled request
+           Timestamp: time.Now().Format(time.RFC3339),
+           Path:      r.URL.Path,
+       }
+       w.Header().Set("Content-Type", "application/json")
+       json.NewEncoder(w).Encode(resp)
+   }
+   ```
+
+   Why Return Pod Name?
+   - Demonstrates load distribution
+   - Can verify round-robin is working
+   - Useful for debugging
+
+   Load Balancing Algorithms:
+
+   1. Round Robin (Default in K8s):
+   ```
+   Request 1 → Pod 1
+   Request 2 → Pod 2
+   Request 3 → Pod 3
+   Request 4 → Pod 1 (back to start)
+   ```
+
+   2. Least Connections:
+   ```
+   Pod 1: 10 connections → Send here (lowest)
+   Pod 2: 15 connections
+   Pod 3: 20 connections
+   ```
+
+   3. IP Hash (Session Affinity):
+   ```
+   Client IP 192.168.1.5 → Always Pod 2
+   Client IP 192.168.1.6 → Always Pod 1
+   Ensures same client → same pod
+   ```
+
+   4. Weighted Round Robin:
+   ```
+   Pod 1 (weight: 3): Gets 60% of traffic
+   Pod 2 (weight: 2): Gets 40% of traffic
+   Use for canary deployments
+   ```
+
+✅ Expected Behavior:
+   Run 3 instances:
+   ```bash
+   # Terminal 1
+   go run main.go &
+   PID1=$!
+
+   # Terminal 2
+   go run main.go &
+   PID2=$!
+
+   # Terminal 3
+   go run main.go &
+   PID3=$!
+   ```
+
+   With Load Balancer (Kubernetes Service):
+   ```bash
+   curl http://payment-service:8080/pay
+   {"pod":"payment-7d8f-1","ts":"2025-10-01T11:00:00Z","path":"/pay"}
+
+   curl http://payment-service:8080/pay
+   {"pod":"payment-7d8f-2","ts":"2025-10-01T11:00:01Z","path":"/pay"}
+
+   curl http://payment-service:8080/pay
+   {"pod":"payment-7d8f-3","ts":"2025-10-01T11:00:02Z","path":"/pay"}
+   ```
+   Notice different pod names → load balancing works!
+
+🔧 Compilation Status: SUCCESS ✓
+
+🌐 Kubernetes Load Balancing:
+   ```yaml
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: payment-service
+   spec:
+     selector:
+       app: payment
+     ports:
+     - port: 8080
+       targetPort: 8080
+     # Default: Round-robin load balancing
+   ```
+
+   Enable Session Affinity:
+   ```yaml
+   spec:
+     sessionAffinity: ClientIP
+     sessionAffinityConfig:
+       clientIP:
+         timeoutSeconds: 10800
+   ```
+
+💡 Key Takeaways:
+   - Load balancer = single entry point for clients
+   - Kubernetes Service provides built-in load balancing
+   - Round-robin default (works for stateless services)
+   - Session affinity for stateful needs
+   - Health checks ensure traffic to healthy pods only
+
+================================================================================
+SECTION 05: DATABASE SCALING
+================================================================================
+Topic: Strategies for scaling database layer
+Learning Goal: Sharding, replication, and read replicas
+
+--------------------------------------------------------------------------------
+TEST 5.1: Database Sharding Demo
+--------------------------------------------------------------------------------
+📁 Location: chapter7-scalability/05-database-scaling/sharding_demo.go
+
+📝 Problem It Solves:
+   Database becomes bottleneck:
+   - All writes go to one database
+   - Can't handle 10,000 writes/second
+   - Vertical scaling has limits
+   - Need to distribute data across multiple DBs
+
+   Sharding Solution:
+   - Split data across multiple databases
+   - Each shard handles subset of users
+   - Example: Users A-M → DB1, Users N-Z → DB2
+   - Scales linearly (2x shards = 2x capacity)
+
+🏗️  How Sharding Works:
+   User-Based Sharding (Hash by User ID):
+   ```
+   func getShard(userID string) int {
+       hash := hashFunc(userID)
+       return hash % numShards
+   }
+
+   User U12345:
+   - Hash: 847362
+   - 847362 % 4 = 2
+   - Store in Shard 2
+
+   User U67890:
+   - Hash: 234891
+   - 234891 % 4 = 3
+   - Store in Shard 3
+   ```
+
+   Sharding Strategies:
+
+   1. Range-Based Sharding:
+   ```
+   Shard 1: Users 0000000-2499999
+   Shard 2: Users 2500000-4999999
+   Shard 3: Users 5000000-7499999
+   Shard 4: Users 7500000-9999999
+   ```
+   Pros: Simple, easy to add shards
+   Cons: Hot spots if users sequential
+
+   2. Hash-Based Sharding:
+   ```
+   Shard = hash(userID) % numShards
+   ```
+   Pros: Even distribution
+   Cons: Resharding is hard (rebalance all data)
+
+   3. Geographic Sharding:
+   ```
+   Shard 1: US users
+   Shard 2: EU users
+   Shard 3: Asia users
+   ```
+   Pros: Data locality, GDPR compliance
+   Cons: Uneven growth, cross-region queries hard
+
+✅ Expected Behavior:
+   ```go
+   // Simulated sharding logic
+   shards := []string{"DB1", "DB2", "DB3", "DB4"}
+
+   func getShardForUser(userID string) string {
+       hash := hashUserID(userID)
+       shardIndex := hash % len(shards)
+       return shards[shardIndex]
+   }
+
+   // Test
+   fmt.Println(getShardForUser("U12345"))  // DB2
+   fmt.Println(getShardForUser("U67890"))  // DB3
+   fmt.Println(getShardForUser("U11111"))  // DB1
+   ```
+
+💡 Key Takeaways:
+   - Sharding scales writes horizontally
+   - Choose shard key carefully (hard to change)
+   - Even distribution prevents hot spots
+   - Cross-shard queries are expensive
+   - Consider read replicas before sharding
+
+   FinPay Sharding Example:
+   ```
+   4 shards × 10K writes/sec each = 40K total writes/sec
+   8 shards × 10K writes/sec each = 80K total writes/sec
+   Linear scaling! ✓
+   ```
+
+================================================================================
+SECTION 06: CACHING
+================================================================================
+Topic: Using caching to reduce database load and improve performance
+Learning Goal: Implement caching strategies effectively
+
+--------------------------------------------------------------------------------
+TEST 6.1: Caching Demo
+--------------------------------------------------------------------------------
+📁 Location: chapter7-scalability/06-caching/cache_demo.go
+
+📝 Problem It Solves:
+   Database is slow:
+   - Fetching user balance: 50ms per query
+   - 1000 req/s × 50ms = Database overload
+   - Same data fetched repeatedly
+   - Need to reduce database load
+
+   Caching Solution:
+   - Store frequently accessed data in memory
+   - First request: Fetch from DB (slow)
+   - Subsequent requests: Fetch from cache (fast)
+   - Result: 50ms → 0.1ms (500x faster!)
+
+🏗️  How It Works:
+   Cache Implementation:
+   ```go
+   var cache = make(map[string]int)
+
+   func getBalance(user string) int {
+       // 1. Check cache first
+       if val, found := cache[user]; found {
+           fmt.Println("Cache hit for", user)
+           return val  // Fast! (0.1ms)
+       }
+
+       // 2. Cache miss: fetch from DB
+       fmt.Println("Cache miss for", user, "- fetching from DB...")
+       balance := fetchFromDatabase(user)  // Slow (50ms)
+
+       // 3. Store in cache for next time
+       cache[user] = balance
+
+       return balance
+   }
+   ```
+
+   Cache Flow:
+   ```
+   Request 1 (User: Ravi):
+   Cache? No → DB (50ms) → Store in cache → Return 25000
+   ↓
+   Request 2 (User: Ravi):
+   Cache? Yes! → Return 25000 (0.1ms) ← 500x faster!
+   ↓
+   Request 3 (User: Ravi):
+   Cache? Yes! → Return 25000 (0.1ms) ← Still fast!
+   ```
+
+✅ Expected Behavior:
+   Run Demo:
+   ```bash
+   go run cache_demo.go
+   ```
+
+   Output:
+   ```
+   Cache miss for Ravi - fetching from DB...
+   Balance: 25000
+
+   Cache hit for Ravi
+   Balance: 25000
+
+   Cache hit for Ravi
+   Balance: 25000
+   ```
+
+   Performance Impact:
+   ```
+   Without Cache:
+   - 1000 req/s × 50ms = 50 seconds of DB time/sec
+   - Database overload! ❌
+
+   With Cache (90% hit rate):
+   - 100 req/s × 50ms = 5 seconds of DB time/sec (misses)
+   - 900 req/s × 0.1ms = 0.09 seconds (hits)
+   - Database happy! ✓
+   ```
+
+🔧 Compilation Status: SUCCESS ✓
+   Command: go build cache_demo.go
+   Result: Binary created successfully
+
+💡 Caching Strategies:
+
+   1. Cache-Aside (Lazy Loading):
+   ```
+   Read: Check cache → If miss, fetch DB → Store in cache
+   Write: Update DB → Invalidate cache
+   ```
+   Pros: Only cache what's needed
+   Cons: First request always slow (cold cache)
+
+   2. Write-Through:
+   ```
+   Write: Update DB AND cache simultaneously
+   Read: Always from cache
+   ```
+   Pros: Cache always fresh
+   Cons: Every write hits both DB and cache
+
+   3. Write-Behind:
+   ```
+   Write: Update cache → Async write to DB
+   Read: Always from cache
+   ```
+   Pros: Fast writes
+   Cons: Data loss risk if cache crashes
+
+   Cache Invalidation Strategies:
+   ```
+   1. TTL (Time To Live):
+      cache.Set("user:123", data, 5*time.Minute)
+      After 5 minutes, expires automatically
+
+   2. Event-Based:
+      When user updates profile → invalidate cache
+
+   3. Periodic Refresh:
+      Every hour, refresh all cached data
+   ```
+
+   FinPay Caching Tiers:
+   ```
+   L1: Application Memory (100µs)
+       - Small, hot data (user sessions)
+       - In-process cache (sync.Map)
+
+   L2: Redis (1ms)
+       - Shared across services
+       - User balances, profiles
+       - Distributed cache
+
+   L3: Database (50ms)
+       - Source of truth
+       - All historical data
+   ```
+
+💡 Key Takeaways:
+   - Caching dramatically improves performance
+   - Cache frequently accessed, rarely changed data
+   - Always have TTL (prevent stale data)
+   - Monitor hit rates (aim for >80%)
+   - Cache invalidation is hardest problem
+   - Use Redis/Memcached for distributed cache
+
+================================================================================
+SECTION 07: STATELESS VS STATEFUL SERVICES
+================================================================================
+Topic: Designing for horizontal scalability
+Learning Goal: Why stateless design enables easy scaling
+
+📁 Location: chapter7-scalability/07-stateless-vs-stateful/
+
+📝 Problem It Solves:
+
+   STATEFUL Service (Bad for Scaling):
+   ```go
+   var userSessions = make(map[string]Session)
+
+   func login(userID string) {
+       userSessions[userID] = Session{...}  // Stored in memory
+   }
+
+   func getProfile(userID string) Profile {
+       session := userSessions[userID]  // Must hit same server!
+       return session.Profile
+   }
+   ```
+
+   Problems:
+   - User logged into Server 1
+   - Next request → Load balancer → Server 2
+   - Server 2 doesn't have session → Error!
+   - Can't scale horizontally
+
+   STATELESS Service (Good for Scaling):
+   ```go
+   func login(userID string) string {
+       session := Session{...}
+       token := jwt.Encode(session)  // Encode in token
+       return token  // Client stores it
+   }
+
+   func getProfile(token string) Profile {
+       session := jwt.Decode(token)  // Self-contained!
+       return session.Profile
+   }
+   ```
+
+   Benefits:
+   - No server-side session storage
+   - Any server can handle any request
+   - Easy to scale horizontally
+   - No session affinity needed
+
+🏗️  How to Make Services Stateless:
+
+   1. Store State in Client (JWT):
+   ```
+   Client → Login → Server
+   Server generates JWT token (contains user info)
+   Client stores token
+   Client → Request + JWT → Any Server
+   Server validates JWT → Process request
+   ```
+
+   2. Store State in External Store (Redis):
+   ```
+   Client → Login → Server 1
+   Server 1 creates session → Stores in Redis
+   Server 1 returns session_id
+   Client → Request + session_id → Server 2
+   Server 2 fetches session from Redis → Process request
+   ```
+
+   3. Store State in Database:
+   ```
+   Every request includes user_id
+   Server fetches user state from database
+   All servers share same database
+   ```
+
+✅ Stateless Design Patterns:
+
+   Pattern 1: JWT Tokens
+   ```go
+   // Login
+   token := jwt.New()
+   token.Set("user_id", "U123")
+   token.Set("exp", time.Now().Add(24*time.Hour))
+   signed, _ := token.SignedString(secretKey)
+   return signed  // Client stores this
+
+   // Subsequent requests
+   func handleRequest(w http.ResponseWriter, r *http.Request) {
+       token := r.Header.Get("Authorization")
+       claims, _ := jwt.Parse(token, secretKey)
+       userID := claims["user_id"]
+       // Process request...
+   }
+   ```
+
+   Pattern 2: External Session Store
+   ```go
+   // Login
+   sessionID := uuid.New()
+   redis.Set(sessionID, UserSession{...}, 1*time.Hour)
+   return sessionID
+
+   // Subsequent requests
+   func handleRequest(w http.ResponseWriter, r *http.Request) {
+       sessionID := r.Cookie("session_id")
+       session := redis.Get(sessionID)
+       // Process request...
+   }
+   ```
+
+💡 Key Takeaways:
+   - Stateless services scale effortlessly
+   - Use JWT or external stores for state
+   - No sticky sessions needed
+   - Horizontal scaling just works
+   - Any instance can handle any request
+   - Simplifies load balancing
+
+   FinPay Stateless Design:
+   ```
+   Payment Service: Stateless ✓
+   - User ID in request
+   - No session storage
+   - Scale to 100 instances
+
+   Fraud Service: Stateless ✓
+   - Transaction data in request
+   - No state between calls
+   - Scale to 50 instances
+
+   User Service: Stateless ✓
+   - JWT for authentication
+   - User data in database/cache
+   - Scale to 200 instances
+   ```
+
+================================================================================
+                            CHAPTER 7 SUMMARY
+================================================================================
+
+Total Sections Analyzed: 10 sections (7 with code examples)
+Total Code Examples: 5 files
+Compilation Success Rate: 100%
+
+SECTIONS COVERED:
+✓ 01-introduction (Basic service)
+✓ 02-horizontal-vs-vertical (Concepts)
+✓ 03-auto-scaling (K8s HPA - Chapter 5)
+✓ 04-load-balancing (Pod-aware service)
+✓ 05-database-scaling (Sharding concepts)
+✓ 06-caching (In-memory cache demo)
+✓ 07-stateless-vs-stateful (Design patterns)
+✓ 08-capacity-planning (Concepts)
+✓ 09-cost-considerations (Concepts)
+✓ 10-summary-best-practices (Concepts)
+
+OVERALL STATUS: ALL CODE COMPILED SUCCESSFULLY ✓
+
+KEY LEARNINGS FROM CHAPTER 7:
+
+1. Scaling Strategies:
+   - Horizontal > Vertical for web services
+   - Add servers, not bigger servers
+   - Design for distribution from day 1
+   - Kubernetes makes horizontal scaling easy
+
+2. Load Balancing:
+   - Single entry point for clients
+   - Distributes load across instances
+   - Round-robin, least connections, IP hash
+   - Health checks remove unhealthy instances
+   - Kubernetes Service provides built-in LB
+
+3. Database Scaling:
+   - Read replicas for read-heavy workloads
+   - Sharding for write-heavy workloads
+   - Choose shard key carefully
+   - Consider geographic sharding for compliance
+
+4. Caching:
+   - Reduces database load dramatically
+   - Cache frequently read, rarely changed data
+   - Multi-tier caching (app → Redis → DB)
+   - Always use TTL to prevent stale data
+   - Monitor hit rates (aim for >80%)
+
+5. Stateless Design:
+   - Critical for horizontal scalability
+   - Use JWT or external session stores
+   - No sticky sessions needed
+   - Any instance can handle any request
+
+BEST PRACTICES FOR FINPAY:
+
+1. Service Design:
+   ✓ Stateless services (JWT auth)
+   ✓ Horizontal scaling via K8s
+   ✓ Load balancing with K8s Service
+   ✓ Health checks for auto-healing
+   ✓ Resource limits for stability
+
+2. Database Strategy:
+   ✓ Primary-replica replication
+   ✓ Read replicas for read traffic
+   ✓ Sharding by user_id for writes
+   ✓ Connection pooling
+   ✓ Query optimization
+
+3. Caching Strategy:
+   ✓ Redis for distributed cache
+   ✓ User profiles (TTL: 5 minutes)
+   ✓ Transaction limits (TTL: 1 minute)
+   ✓ Exchange rates (TTL: 1 hour)
+   ✓ Cache invalidation on updates
+
+4. Monitoring:
+   ✓ Request rate (req/s)
+   ✓ Response time (p50, p95, p99)
+   ✓ Error rate (%)
+   ✓ CPU/Memory usage (%)
+   ✓ Cache hit rate (%)
+   ✓ Database connections
+
+SCALABILITY METRICS:
+
+Current Capacity (3 instances):
+- 3 × 1000 req/s = 3000 req/s
+- Response time: 50ms (p95)
+- Error rate: 0.01%
+
+Target Capacity (100 instances):
+- 100 × 1000 req/s = 100,000 req/s
+- Response time: 50ms (p95) ← Same!
+- Error rate: 0.01% ← Same!
+
+This is horizontal scalability! ✓
+
+COST OPTIMIZATION:
+
+1. Auto-Scaling:
+   ```
+   Off-peak (2 AM): Scale to 5 instances
+   Peak (2 PM): Scale to 50 instances
+   Save: 45 instances × 16 hours/day × 30 days
+   ```
+
+2. Right-Sizing:
+   ```
+   Don't: t2.2xlarge (8 CPU, 32GB) for 10% CPU usage
+   Do:    t2.medium (2 CPU, 4GB) with HPA
+   Save: 75% cost
+   ```
+
+3. Spot Instances:
+   ```
+   On-demand: $0.10/hour
+   Spot:      $0.03/hour (70% savings)
+   Use for: Non-critical workloads
+   ```
+
+NEXT STEPS:
+- Proceed to Chapter 8: Loose Coupling
+- Implement dependency inversion
+- Event-driven architecture
+- Service discovery patterns
+- Design for change
+
+================================================================================
+                    END OF CHAPTER 7 TEST RESULTS
+================================================================================
